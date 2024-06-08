@@ -1,120 +1,169 @@
 #include <iostream>
+#include <vector>
 #include <opencv2/opencv.hpp>
 #include <tensorflow/lite/interpreter.h>
 #include <tensorflow/lite/kernels/register.h>
 #include <tensorflow/lite/model.h>
-#include <tensorflow/lite/optional_debug_tools.h>
 
-using namespace cv;
-using namespace std;
+// Path to the TFLite model
+const char* model_path = "model.tflite";
 
-Mat resizeWithPadding(const Mat& src, Size targetSize) {
-    int originalWidth = src.cols;
-    int originalHeight = src.rows;
-    float aspectRatio = static_cast<float>(originalWidth) / originalHeight;
+// Define the connections between the keypoints
+const std::vector<std::pair<int, int>> KEYPOINT_EDGES = {
+    {0, 1}, {0, 2}, {1, 3}, {2, 4}, {0, 5}, {0, 6}, {5, 7},
+    {7, 9}, {6, 8}, {8, 10}, {5, 6}, {5, 11}, {6, 12}, {11, 12}, {11, 13},
+    {13, 15}, {12, 14}, {14, 16}
+};
 
-    int targetWidth = targetSize.width;
-    int targetHeight = targetSize.height;
-    float targetAspectRatio = static_cast<float>(targetWidth) / targetHeight;
+cv::Scalar COLOR1 = cv::Scalar(255, 31, 135); // purple
+cv::Scalar COLOR2 = cv::Scalar(36, 204, 242); // yellow
+cv::Scalar COLOR3 = cv::Scalar(26, 240, 126); // lemon
 
-    int newWidth, newHeight;
-    if (aspectRatio > targetAspectRatio) {
-        newWidth = targetWidth;
-        newHeight = static_cast<int>(targetWidth / aspectRatio);
-    } else {
-        newHeight = targetHeight;
-        newWidth = static_cast<int>(targetHeight * aspectRatio);
-    }
+// Define the colors for the connections
+const std::vector<cv::Scalar> EDGE_COLORS = {
+    COLOR2, COLOR1, COLOR2,
+    COLOR1, COLOR2, COLOR1,
+    COLOR2, COLOR2, COLOR1,
+    COLOR1, COLOR3, COLOR2,
+    COLOR1, COLOR3, COLOR2,
+    COLOR3, COLOR1, COLOR1
+};
 
-    Mat resizedImage;
-    resize(src, resizedImage, Size(newWidth, newHeight));
+// Function to process a frame
+std::vector<float> process_frame(const cv::Mat& frame, tflite::Interpreter* interpreter, int input_index, int output_index, const TfLiteTensor* input_tensor) {
+    // Resize the frame to match the input shape of the model
+    cv::Mat input_image;
+    cv::resize(frame, input_image, cv::Size(input_tensor->dims->data[2], input_tensor->dims->data[1]));
 
-    int top = (targetHeight - newHeight) / 2;
-    int bottom = targetHeight - newHeight - top;
-    int left = (targetWidth - newWidth) / 2;
-    int right = targetWidth - newWidth - left;
+    // Convert the frame to uint8
+    input_image.convertTo(input_image, CV_8U);
 
-    Mat paddedImage;
-    copyMakeBorder(resizedImage, paddedImage, top, bottom, left, right, BORDER_CONSTANT, Scalar(0, 0, 0));
-
-    return paddedImage;
-}
-
-int main() {
-    // Ruta de la imagen y del modelo
-    string image_path = "img1.png";
-    string model_path = "movenet_lightning_fp16.tflite";
-
-    // Leer la imagen
-    Mat image = imread(image_path);
-    if (image.empty()) {
-        cerr << "Could not read the image: " << image_path << endl;
-        return 1;
-    }
-
-    // Redimensionar la imagen a 192x192 con padding
-    Mat input_image = resizeWithPadding(image, Size(192, 192));
-
-    // Convertir la imagen a uint8
-    input_image.convertTo(input_image, CV_8UC3);
-
-    // Cargar el modelo TFLite
-    unique_ptr<tflite::FlatBufferModel> model = tflite::FlatBufferModel::BuildFromFile(model_path.c_str());
-    tflite::ops::builtin::BuiltinOpResolver resolver;
-    unique_ptr<tflite::Interpreter> interpreter;
-    tflite::InterpreterBuilder(*model, resolver)(&interpreter);
-
+    // Add a dimension to the frame
+    std::vector<int> input_shape = {1, input_tensor->dims->data[1], input_tensor->dims->data[2], input_tensor->dims->data[3]};
+    interpreter->ResizeInputTensor(input_index, input_shape);
     interpreter->AllocateTensors();
 
-    // Obtener detalles del tensor de entrada
-    int input = interpreter->inputs()[0];
-    int output = interpreter->outputs()[0];
+    // Copy the frame data to the input tensor
+    memcpy(interpreter->typed_input_tensor<uint8_t>(input_index), input_image.data, input_image.total() * input_image.elemSize());
 
-    // Preparar los datos de entrada
-    uint8_t* input_tensor = interpreter->typed_tensor<uint8_t>(input);
-    memcpy(input_tensor, input_image.data, input_image.total() * input_image.elemSize());
-
-    // Ejecutar la inferencia
+    // Run inference
     interpreter->Invoke();
 
-    // Obtener los resultados de salida
-    float* output_data = interpreter->typed_output_tensor<float>(0);
+    // Get the keypoints with scores
+    const TfLiteTensor* output_tensor = interpreter->tensor(output_index);
+    std::vector<float> keypoints_with_scores(output_tensor->data.f, output_tensor->data.f + output_tensor->bytes / sizeof(float));
+    // print the keypoints with scores
+    // for (float score : keypoints_with_scores) {
+    //     std::cout << score << "\n";
+    // }
+    return keypoints_with_scores;
+}
+
+// Function to draw keypoints and edges on the image
+cv::Mat draw_predictions_on_image(cv::Mat& image, const std::vector<float>& keypoints_with_scores, float keypoint_threshold = 0.11) {
+    int height = image.rows;
+    int width = image.cols;
+
+    for (size_t idx = 0; idx < KEYPOINT_EDGES.size(); ++idx) {
+        auto [start, end] = KEYPOINT_EDGES[idx];
+        cv::Scalar color = EDGE_COLORS[idx];
+
+        float start_score = keypoints_with_scores[start * 3 + 2];
+        float end_score = keypoints_with_scores[end * 3 + 2];
+
+        if (start_score > keypoint_threshold && end_score > keypoint_threshold) {
+            cv::Point start_point(static_cast<int>(keypoints_with_scores[start * 3 + 1] * width),
+                                  static_cast<int>(keypoints_with_scores[start * 3] * height));
+            cv::Point end_point(static_cast<int>(keypoints_with_scores[end * 3 + 1] * width),
+                                static_cast<int>(keypoints_with_scores[end * 3] * height));
+            cv::line(image, start_point, end_point, color, 2);
+        }
+    }
+
+    for (size_t i = 0; i < keypoints_with_scores.size() / 3; ++i) {
+        float score = keypoints_with_scores[i * 3 + 2];
+        if (score > keypoint_threshold) {
+            cv::Point center(static_cast<int>(keypoints_with_scores[i * 3 + 1] * width),
+                             static_cast<int>(keypoints_with_scores[i * 3] * height));
+            cv::circle(image, center, 3, cv::Scalar(0, 0, 255), -1);
+        }
+    }
     
-    // print keypoints with format (y, x, score)
-    for (int i = 0; i < 17; i++) {
-        cout << output_data[i * 3] << ", " << output_data[i * 3 + 1] << ", " << output_data[i * 3 + 2] << endl;
+    return image;
+}
+
+
+int main() {
+    // Load the TFLite model
+    std::unique_ptr<tflite::FlatBufferModel> model = tflite::FlatBufferModel::BuildFromFile(model_path);
+    if (!model) {
+        std::cerr << "Failed to load model\n";
+        return -1;
     }
 
-
-    // Redimensionar la imagen para visualización
-    int width = 640;
-    int height = 640;
-    Mat display_image = resizeWithPadding(image, Size(width, height));
-
-    // Dibujar los keypoints en la imagen
-    vector<Point> keypoints(17);
-    for (int i = 0; i < 17; ++i) { // 17 keypoints for MoveNet
-        int y = static_cast<int>(output_data[i * 3] * height);
-        int x = static_cast<int>(output_data[i * 3 + 1] * width);
-        keypoints[i] = Point(x, y);
-        circle(display_image, Point(x, y), 4, Scalar(0, 0, 255), -1);
+    // Build the interpreter
+    tflite::ops::builtin::BuiltinOpResolver resolver;
+    std::unique_ptr<tflite::Interpreter> interpreter;
+    tflite::InterpreterBuilder(*model, resolver)(&interpreter);
+    if (!interpreter) {
+        std::cerr << "Failed to build interpreter\n";
+        return -1;
     }
 
-    // Definir las conexiones entre los keypoints
-    vector<pair<int, int>> KEYPOINT_EDGES = {
-        {0, 1}, {0, 2}, {1, 3}, {2, 4}, {0, 5}, {0, 6}, {5, 7},
-        {7, 9}, {6, 8}, {8, 10}, {5, 6}, {5, 11}, {6, 12}, {11, 12}, {11, 13},
-        {13, 15}, {12, 14}, {14, 16}
-    };
-
-    // Dibujar las líneas entre los keypoints
-    for (const auto& edge : KEYPOINT_EDGES) {
-        line(display_image, keypoints[edge.first], keypoints[edge.second], Scalar(0, 255, 0), 2);
+    // Allocate tensors
+    if (interpreter->AllocateTensors() != kTfLiteOk) {
+        std::cerr << "Failed to allocate tensors\n";
+        return -1;
     }
 
-    // Mostrar la imagen con los keypoints
-    imshow("pose estimation", display_image);
-    waitKey(0);
+    // Get input and output tensor details
+    int input_index = interpreter->inputs()[0];
+    int output_index = interpreter->outputs()[0];
+    const TfLiteTensor* input_tensor = interpreter->tensor(input_index);
+
+    // Video path
+    const char* video_path = "sentadilla.mp4";
+
+    // Capture video from the camera
+    cv::VideoCapture cap(video_path);
+    if (!cap.isOpened()) {
+        std::cerr << "Error opening video file\n";
+        return -1;
+    }
+
+    std::cout<<" Todo bien hasta aqui"<< std::endl;
+
+    while (true) {
+        // Read a frame
+        cv::Mat frame;
+        cap >> frame;
+        if (frame.empty()) {
+            break;
+        }
+
+        // Convert the frame to RGB
+        cv::Mat frame_rgb;
+        cv::cvtColor(frame, frame_rgb, cv::COLOR_BGR2RGB);
+
+        // Process the frame
+        std::vector<float> keypoints_with_scores = process_frame(frame_rgb, interpreter.get(), input_index, output_index, input_tensor);
+
+        // Draw the keypoints and edges on the frame
+        cv::Mat processed_frame = draw_predictions_on_image(frame, keypoints_with_scores);
+
+        // Show the processed frame
+        cv::imshow("pose estimation", processed_frame);
+
+        // Exit the loop if the 'q' key is pressed or if clicked on the close button
+        if (cv::waitKey(1) == 'q') {
+            break;
+        }
+        
+    }
+
+    // Release the video capture and close windows
+    cap.release();
+    cv::destroyAllWindows();
 
     return 0;
 }

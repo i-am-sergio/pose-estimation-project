@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.17)
 project(TFLiteMoveNet)
 
-set(CMAKE_CXX_STANDARD 14)
+set(CMAKE_CXX_STANDARD 17)
 
 # Incluir los directorios de encabezados
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../tflite-dist/include/)
@@ -11,8 +11,11 @@ find_package(OpenCV REQUIRED)
 include_directories(${OpenCV_INCLUDE_DIRS})
 
 # file(COPY "thunder.tflite" DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
-file(COPY "movenet_lightning_fp16.tflite" DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
+# file(COPY "movenet_lightning_fp16.tflite" DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
+# file(COPY "4.tflite" DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
+file(COPY "model.tflite" DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
 file(COPY "sentadilla.mp4" DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
+# file(COPY "sentadilla2.mp4" DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
 file(COPY "img1.png" DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
 file(COPY "img2.jpeg" DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
 
